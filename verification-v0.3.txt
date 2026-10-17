@@ -1,0 +1,31 @@
+超禅定时 0.3.0 验证记录
+时间：2026-10-18，Asia/Shanghai
+设备：OnePlus PHK110，Android 16；原生禅定空间 com.oneplus.brickmode 16.7.3。
+
+读取方式与边界
+- 未直接访问原生私有数据库；run-as 返回 package not debuggable。
+- 原生 secure zen_breath_duration 在退出超禅后为 0，源码也显示它是运行状态输出，不能代表尚未启动时的设置值。
+- 使用用户手动授权的只读 AccessibilityService。配置限定 com.oneplus.brickmode，代码再次校验窗口包名。
+- 仅匹配首页 super_zen_item 内唯一的 itemTime；不匹配轻禅卡片、结果页或运行倒计时。
+- 展示最近读取值与时间戳。改动设置后，需要再次显示超禅首页才能更新；这不是后台数据库实时查询。
+- 未知格式不覆盖旧记录；未读过时显示“尚未读取”。
+- 不调用节点点击、手势、全局返回等无障碍操作；不新增联网权限。
+
+已完成验证
+1. Java 编译、资源编译、DEX、签名验证通过；既有 6 个时间边界检查通过。
+2. 覆盖安装成功：com.hujia.zenalarm versionCode=3 / versionName=0.3.0。
+3. 用户在系统中开启“超禅时长读取”，系统 Enabled services 确认此服务。
+4. 从应用点击“读取最新时长”，原生首页显示超禅 1 分钟，同时轻禅包含 120 分钟、60 分钟和不限制时长。
+5. 返回应用后显示“超禅时长 · 最近读取”“1 分钟”“读取于 10月18日 03:32:04”。未误取轻禅时长。
+6. 此次读取期间 op_breath_mode_status=0，未启动超禅，也未修改原生时长。
+7. 系统保留两条精确预约：2026-10-19 00:55 REMIND（1792342500000）与 01:00 DAILY（1792342800000），windowLength=0。
+8. 定时总开关和 01:00 独立开关均开启；此次未增加测试预约，未重复进行锁屏、息屏或重启启动测试。
+
+产物
+zen-alarm-v0.3.0.apk，33391 字节。
+SHA256：6f676a24fc70c6e1c21eb44ea11f0e3dad22692e50ec6f3e19e84e38c8104bd6
+
+实现依据
+- 本机原生 APK：holder/k.java 将 SuperZen.getUseTime() 显示到超禅卡片的 itemTime。
+- Android 官方无障碍服务文档：https://developer.android.com/guide/topics/ui/accessibility/views/service
+- Android AccessibilityService API：https://developer.android.com/reference/android/accessibilityservice/AccessibilityService

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="duration_reader_label">超禅时长读取</string>
+    <string name="duration_reader_description">打开超禅定时时，自动打开禅定空间首页读取超禅卡片的分钟数，读完自动返回。结果只保存在本机。不会点击开始、修改时长或读取其他应用内容。关闭此服务不影响定时启动。</string>
+</resources>

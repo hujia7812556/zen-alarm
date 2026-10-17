@@ -1,0 +1,39 @@
+# 构建缓存、Android SDK 和本机诊断材料
+/build/
+/dist/
+/work/
+/android-sdk/
+/sdk/
+/screenshots/
+/diagnostics/
+__pycache__/
+*.py[cod]
+*.class
+*.dex
+*.log
+
+# 安装包及签名附属文件
+*.apk
+*.apks
+*.aab
+*.idsig
+
+# 签名密钥和本机配置；示例配置可以提交
+/.signing/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*.pem
+/build.local.json
+/local.properties
+.env
+.env.*
+!.env.example
+
+# macOS 与编辑器本机状态
+.DS_Store
+/.idea/
+/.vscode/
+*.iml

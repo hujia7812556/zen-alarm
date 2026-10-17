@@ -1,0 +1,4 @@
+{
+  "build_tools": "/path/to/android-sdk/build-tools/36.0.0",
+  "android_jar": "/path/to/android-sdk/platforms/android-36/android.jar"
+}
