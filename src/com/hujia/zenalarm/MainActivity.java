@@ -30,10 +30,12 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.time.Instant;
 import java.time.LocalTime;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /** 简洁的定时首页及设置子页面，区分自动读取和用户主动打开超禅。 */
 public final class MainActivity extends Activity {
@@ -81,6 +83,7 @@ public final class MainActivity extends Activity {
         skipAutomaticRead = false;
         if (skip) ZenDurationReader.cancelRequest();
         ZenScheduler.scheduleDaily(this); render();
+        handler.postDelayed(() -> { if (resumed && page == PERMISSIONS) render(); }, 300);
         SharedPreferences p = ZenScheduler.prefs(this);
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                 && !p.getBoolean("notification_asked", false)) {
@@ -196,14 +199,10 @@ public final class MainActivity extends Activity {
     /** 首页仅展示启动状态、时长、每日列表和添加入口。 */
     private void renderHome() {
         header("超禅定时");
-        SharedPreferences p = ZenScheduler.prefs(this);
         LinearLayout summary = card();
-        Switch master = new Switch(this); master.setText("定时总开关"); master.setTextSize(16); master.setTextColor(INK);
-        master.setChecked(p.getBoolean("enabled", true));
-        master.setOnCheckedChangeListener((v, checked) -> { ZenScheduler.setEnabled(this, checked); render(); });
-        add(summary, master, 14);
+        add(summary, text("固定定时已开启", 16, true), 14);
         long next = ZenScheduler.next(this); String missing = ZenScheduler.missing(this);
-        String status = !p.getBoolean("enabled", true) ? "所有定时已暂停" : !missing.isEmpty() ? "等待完成运行设置"
+        String status = !missing.isEmpty() ? "等待完成运行设置"
                 : next > 0 ? shortTime(next) : "还没有开启的定时";
         add(summary, muted("下次启动", 12), 3); add(summary, text(status, 23, true), 0); add(body, summary, 14);
         if (!missing.isEmpty()) add(body, entry("需要完成运行设置", missing, v -> showPage(PERMISSIONS)), 14);
@@ -248,6 +247,7 @@ public final class MainActivity extends Activity {
 
     /** 定时卡片突出时间和开关，编辑点击时间，删除放入更多菜单。 */
     private View slotCard(ScheduleStore.Slot slot) {
+        if (slot.time == FixedTime.TIME) return fixedSlotCard();
         LinearLayout card = card(); LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
         TextView time = text(ZenScheduler.clockTime(slot.time), 33, true); time.setContentDescription("修改 " + ZenScheduler.clockTime(slot.time));
         time.setOnClickListener(v -> chooseTime(slot)); row.addView(time, new LinearLayout.LayoutParams(0, -2, 1));
@@ -262,8 +262,42 @@ public final class MainActivity extends Activity {
         add(card, row, 3); add(card, muted(slot.enabled ? "每天 · 提前 5 分钟提醒" : "已关闭", 13), 0); return card;
     }
 
+    /** 固定卡片不显示开关或编辑入口，唯一调整为每周最多两次推迟半小时。 */
+    private View fixedSlotCard() {
+        LinearLayout card = card(); LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(text("01:00", 33, true), new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(text("固定", 14, true)); add(card, row, 3);
+        add(card, muted("每天 · 提前 5 分钟提醒", 13), 10);
+        long now = System.currentTimeMillis(); ZoneId zone = ZoneId.systemDefault();
+        Set<LocalDate> dates = ZenScheduler.postponements(this);
+        LocalDate date = FixedTime.nextDate(now, zone, dates);
+        boolean postponed = dates.contains(date); int remaining = FixedTime.remaining(date, dates);
+        boolean thisWeek = FixedTime.weekStart(date).equals(FixedTime.weekStart(LocalDate.now(zone)));
+        add(card, muted((thisWeek ? "本周" : "下周") + "剩余 " + remaining + " 次推迟机会 · 周一重置", 12), 8);
+        if (postponed) add(card, muted("本次启动：" + shortTime(FixedTime.next(now, zone, dates)), 13), 8);
+        Button postpone = button(postponed ? "本次已推迟至 01:30" : remaining == 0 ? "该周推迟次数已用完" : "下次推迟 30 分钟", false, v -> confirmPostpone());
+        postpone.setEnabled(!postponed && remaining > 0); postpone.setAlpha(postpone.isEnabled() ? 1f : .45f);
+        add(card, postpone, 0); return card;
+    }
+
+    /** 使用机会前说明具体日期；确认时由调度层重新核对次数，避免页面过期或重复点击。 */
+    private void confirmPostpone() {
+        long now = System.currentTimeMillis(); ZoneId zone = ZoneId.systemDefault();
+        Set<LocalDate> dates = ZenScheduler.postponements(this);
+        LocalDate date = FixedTime.nextDate(now, zone, dates);
+        String day = date.format(DateTimeFormatter.ofPattern("M月d日", Locale.CHINA));
+        new AlertDialog.Builder(this).setTitle("推迟本次固定定时")
+                .setMessage("将 " + day + " 01:00 推迟至 01:30，使用该周 1 次机会。每周最多 2 次，同一天不能叠加。")
+                .setNegativeButton("取消", null).setPositiveButton("确认推迟", (d, w) -> {
+                    try { ZenScheduler.postponeFixed(this, date); }
+                    catch (IllegalStateException e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); }
+                    render();
+                }).show();
+    }
+
     /** 在单条定时的更多菜单中提供编辑和删除。 */
     private void slotMenu(View anchor, ScheduleStore.Slot slot) {
+        if (slot.time == FixedTime.TIME) return;
         PopupMenu menu = new PopupMenu(this, anchor); menu.getMenu().add("编辑时间"); menu.getMenu().add("删除定时");
         menu.setOnMenuItemClickListener(item -> {
             if ("编辑时间".contentEquals(item.getTitle())) chooseTime(slot); else deleteSlot(slot); return true;
@@ -276,7 +310,7 @@ public final class MainActivity extends Activity {
         add(body, entry("执行记录", "查看最近的提醒和启动情况", v -> showPage(RECORDS)), 12);
         add(body, entry("权限管理", "通知、定时运行和时长读取", v -> showPage(PERMISSIONS)), 12);
         add(body, entry("测试与工具", "测试启动、重新读取时长", v -> showPage(TOOLS)), 12);
-        add(body, entry("关于", "超禅定时 0.5.0", v -> showPage(ABOUT)), 0);
+        add(body, entry("关于", "超禅定时 0.5.2", v -> showPage(ABOUT)), 0);
     }
 
     /** 展示最近六条记录，隐藏与日常使用无关的进程编号。 */
@@ -298,10 +332,17 @@ public final class MainActivity extends Activity {
     /** 权限仅在专门页面集中显示，首页只突出会阻止运行的问题。 */
     private void renderPermissions() {
         header("权限管理");
+        LinearLayout guardCard = card();
+        add(guardCard, text("后台定时守护", 16, true), 8);
+        add(guardCard, muted(ZenGuardService.status(this), 13), 8);
+        add(guardCard, muted("守护固定定时，通知无声音和振动。", 12), 0);
+        add(body, guardCard, 10);
         add(body, entry("提醒通知", ZenScheduler.notificationsAllowed(this) ? "已允许 · 每次提前 5 分钟提醒" : "未开启 · 点击设置", v -> notificationSettings()), 10);
         add(body, entry("精确闹钟", ZenScheduler.exactAllowed(this) ? "已允许" : "未允许 · 点击设置", v -> openSettings(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)), 10);
         add(body, entry("锁屏时启动", ZenScheduler.backgroundAllowed(this) ? "悬浮窗权限已允许" : "需要允许悬浮窗权限", v -> openSettings(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)), 10);
         add(body, entry("后台运行", ZenScheduler.batteryAllowed(this) ? "已加入电池优化白名单" : "建议加入电池优化白名单", v -> openSettings(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)), 10);
+        add(body, entry("系统耗电管理", "在应用详情的耗电管理中选择“完全允许后台行为”", v -> openSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)), 10);
+        add(body, entry("系统自启动", "系统设置 → 应用 → 自启动，允许超禅定时", v -> startActivity(new Intent(Settings.ACTION_SETTINGS))), 10);
         add(body, entry("超禅时长读取", ZenDurationReader.enabled(this) ? "已开启 · 只读超禅页面" : "未开启 · 不影响定时启动", v -> {
             if (ZenDurationReader.enabled(this)) startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); else explainReader();
         }), 12);
@@ -331,10 +372,10 @@ public final class MainActivity extends Activity {
     /** 在关于页展示版本、运行方式和明确边界。 */
     private void renderAbout() {
         header("关于"); LinearLayout card = card();
-        add(card, text("超禅定时", 24, true), 6); add(card, muted("0.5.0 · 个人使用版", 14), 18);
+        add(card, text("超禅定时", 24, true), 6); add(card, muted("0.5.2 · 个人使用版", 14), 18);
         add(card, text("完全本地运行\n无需 Tasker、Shizuku 或 Root", 15, false), 18);
         add(card, muted("定时启动使用系统精确闹钟；所有定时沿用原生超禅的时长。时长展示来自最近一次页面读取。", 13), 12);
-        add(card, muted("重启后首次解锁会恢复预约。强行停止应用后，请重新打开。系统或超禅更新后可能需要重新适配。", 13), 0);
+        add(card, muted("每天 01:00 为固定定时。每周最多 2 次将下一次推迟至 01:30，同一天不能叠加。重启后首次解锁会恢复预约。", 13), 0);
         add(body, card, 0);
     }
 
@@ -371,6 +412,7 @@ public final class MainActivity extends Activity {
 
     /** 添加或修改时间，拒绝重复时分并保留该条原有开关。 */
     private void chooseTime(ScheduleStore.Slot original) {
+        if (original != null && original.time == FixedTime.TIME) return;
         LocalTime soon = LocalTime.now().plusMinutes(10); int value = original == null ? soon.getHour() * 60 + soon.getMinute() : original.time;
         LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER);
         NumberPicker hour = new NumberPicker(this); hour.setMinValue(0); hour.setMaxValue(23); hour.setValue(value / 60);
@@ -390,6 +432,7 @@ public final class MainActivity extends Activity {
 
     /** 删除前显示具体时间，确认后取消该条提醒和启动。 */
     private void deleteSlot(ScheduleStore.Slot slot) {
+        if (slot.time == FixedTime.TIME) return;
         new AlertDialog.Builder(this).setMessage("删除每天 " + ZenScheduler.clockTime(slot.time) + " 的定时？")
                 .setNegativeButton("取消", null).setPositiveButton("删除", (d, w) -> {
                     List<ScheduleStore.Slot> slots = ScheduleStore.load(this); slots.removeIf(s -> s.time == slot.time);

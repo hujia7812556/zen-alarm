@@ -11,12 +11,14 @@ import android.content.SharedPreferences;
 import android.os.PowerManager;
 import android.provider.Settings;
 import java.time.ZoneId;
+import java.time.LocalDate;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
-/** 管理多个独立的每日闹钟及提前五分钟提醒，不启动常驻服务。 */
+/** 管理固定 01:00、自定义定时及提醒，并维持前台守护。 */
 public final class ZenScheduler {
     static final String DAILY = "com.hujia.zenalarm.DAILY";
     static final String REMIND = "com.hujia.zenalarm.REMIND";
@@ -112,45 +114,91 @@ public final class ZenScheduler {
     static void cancelTest(Context c) {
         alarms(c).cancel(pending(c, TEST, -1, 0));
         prefs(c).edit().remove("test_at").apply();
+        ZenGuardService.sync(c);
     }
 
-    /** 预约一条定时，五分钟窗口内新建或恢复时尽快提醒。 */
-    static void scheduleSlot(Context c, ScheduleStore.Slot slot) {
-        cancelSlot(c, slot.time);
-        if (!prefs(c).getBoolean("enabled", true) || !slot.enabled || !missing(c).isEmpty()) return;
-        long now = System.currentTimeMillis();
-        long target = AlarmTime.next(now, ZoneId.systemDefault(), slot.time / 60, slot.time % 60);
+    /** 预约一条定时，返回是否登记成功；固定项不受旧版总开关影响。 */
+    static boolean scheduleSlot(Context c, ScheduleStore.Slot slot) {
+        return scheduleSlot(c, slot, System.currentTimeMillis());
+    }
+
+    /** 以不早于已触发预约的时间计算下一轮，避免极早投递导致同一次重复预约。 */
+    static boolean scheduleSlot(Context c, ScheduleStore.Slot slot, long now) {
+        if (!slot.enabled || !missing(c).isEmpty()) { cancelSlot(c, slot.time); return false; }
+        long target = slot.time == FixedTime.TIME ? FixedTime.next(now, ZoneId.systemDefault(), postponements(c))
+                : AlarmTime.next(now, ZoneId.systemDefault(), slot.time / 60, slot.time % 60);
         try {
-            // 先登记启动，通知未授权不阻止实际启动。
+            // 同一身份直接替换闹钟，避免先取消固定预约再登记时留下空档。
+            long previous = prefs(c).getLong("next_" + slot.time, 0);
             set(c, DAILY, slot.time, target, target);
             prefs(c).edit().putLong("next_" + slot.time, target).commit();
+            alarms(c).cancel(pending(c, REMIND, slot.time, 0));
+            if (previous != target) notifications(c).cancel(slot.time);
             if (prefs(c).getLong("reminded_" + slot.time, 0) != target && notificationsAllowed(c)) {
                 long reminder = Math.max(now + 1000, target - REMINDER_LEAD);
                 if (reminder < target) set(c, REMIND, slot.time, reminder, target);
             }
-        } catch (SecurityException e) { record(c, "预约失败：请检查精确闹钟授权"); }
+            return true;
+        } catch (SecurityException e) { record(c, "预约失败：请检查精确闹钟授权"); return false; }
     }
 
     /** 重启、更新、权限变化及返回页面时恢复全部定时。 */
     static void scheduleDaily(Context c) {
+        scheduleDaily(c, true);
+    }
+
+    /** 重建服务时避免再次启动自己，普通恢复入口在预约完成后同步守护。 */
+    static void scheduleDaily(Context c, boolean syncGuard) {
         createChannel(c);
         if (ScheduleStore.migrate(c)) cancelTest(c);
         cancelLegacy(c);
         for (ScheduleStore.Slot slot : ScheduleStore.load(c)) scheduleSlot(c, slot);
+        restoreTest(c);
+        if (syncGuard) ZenGuardService.sync(c);
+    }
+
+    /** 系统恢复或重新打开时仅恢复尚未到期的测试，错过的测试直接清除。 */
+    private static void restoreTest(Context c) {
+        long when = prefs(c).getLong("test_at", 0);
+        if (when == 0) return;
+        if (when <= System.currentTimeMillis()) {
+            alarms(c).cancel(pending(c, TEST, -1, 0));
+            prefs(c).edit().remove("test_at").apply();
+        } else if (missing(c).isEmpty()) {
+            try { set(c, TEST, -1, when, when); }
+            catch (SecurityException e) { record(c, "恢复测试预约失败：请检查精确闹钟授权"); }
+        }
     }
 
     /** 修改列表前取消旧身份，删除和改时不会留下孤立闹钟。 */
     static void saveSlots(Context c, List<ScheduleStore.Slot> slots) {
-        for (ScheduleStore.Slot slot : ScheduleStore.load(c)) cancelSlot(c, slot.time);
+        for (ScheduleStore.Slot slot : ScheduleStore.load(c)) if (slot.time != FixedTime.TIME) cancelSlot(c, slot.time);
         ScheduleStore.save(c, slots);
         scheduleDaily(c);
     }
 
-    /** 总开关关闭时同时取消每日启动、提醒和一次性测试。 */
-    static void setEnabled(Context c, boolean enabled) {
-        prefs(c).edit().putBoolean("enabled", enabled).apply();
-        if (!enabled) cancelTest(c);
-        scheduleDaily(c);
+    /** 读取按执行日期保留的推迟记录，不在重新打开或跨周时删除历史额度。 */
+    static Set<LocalDate> postponements(Context c) {
+        return FixedTime.decode(prefs(c).getString("fixed_postponements", ""));
+    }
+
+    /** 持久化一次推迟并更新实际系统闹钟；失败则恢复原记录和原预约，不消耗机会。 */
+    static void postponeFixed(Context c, LocalDate expectedDate) {
+        String missing = missing(c);
+        if (!missing.isEmpty()) throw new IllegalStateException(missing);
+        long now = System.currentTimeMillis();
+        Set<LocalDate> original = postponements(c);
+        Set<LocalDate> approved = FixedTime.postpone(now, ZoneId.systemDefault(), original, expectedDate);
+        SharedPreferences p = prefs(c);
+        boolean saved = p.edit().putString("fixed_postponements", FixedTime.encode(approved)).commit();
+        if (!saved || !scheduleSlot(c, new ScheduleStore.Slot(FixedTime.TIME, true), now)) {
+            p.edit().putString("fixed_postponements", FixedTime.encode(original)).commit();
+            scheduleSlot(c, new ScheduleStore.Slot(FixedTime.TIME, true), now);
+            ZenGuardService.sync(c);
+            throw new IllegalStateException("推迟未成功，请检查运行设置后重试");
+        }
+        ZenGuardService.sync(c);
+        record(c, "固定定时已推迟：" + format(p.getLong("next_" + FixedTime.TIME, 0)));
     }
 
     /** 保留原有一分钟启动测试入口，不发送五分钟提醒。 */
@@ -159,6 +207,7 @@ public final class ZenScheduler {
         long when = System.currentTimeMillis() + 60000L;
         set(c, TEST, -1, when, when);
         prefs(c).edit().putLong("test_at", when).commit();
+        ZenGuardService.sync(c);
     }
 
     /** 为有效定时发送通知，同一次启动不重复提醒。 */
@@ -166,7 +215,8 @@ public final class ZenScheduler {
         if (!notificationsAllowed(c)) { record(c, "启动前提醒未显示：请开启通知"); return; }
         if (prefs(c).getLong("reminded_" + time, 0) == target) return;
         PendingIntent open = PendingIntent.getActivity(c, 10, new Intent(c, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
-        String message = "将于 " + clockTime(time) + " 自动启动，时长沿用超禅内的设置。";
+        String startTime = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date(target));
+        String message = "将于 " + startTime + " 自动启动，时长沿用超禅内的设置。";
         Notification notification = new Notification.Builder(c, CHANNEL)
                 .setSmallIcon(R.drawable.ic_notification).setContentTitle("超禅即将开始").setContentText(message)
                 .setStyle(new Notification.BigTextStyle().bigText(message))

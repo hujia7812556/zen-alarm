@@ -22,7 +22,7 @@ public final class AlarmReceiver extends BroadcastReceiver {
         SharedPreferences p = ZenScheduler.prefs(c);
         int time = intent.getIntExtra("time", -1);
         ScheduleStore.Slot slot = ScheduleStore.find(ScheduleStore.load(c), time);
-        if (!test && (slot == null || !slot.enabled || !p.getBoolean("enabled", true))) return;
+        if (!test && (slot == null || !slot.enabled)) return;
         long expected = p.getLong(test ? "test_at" : "next_" + time, 0);
         long supplied = intent.getLongExtra("scheduled_at", 0);
         if (expected == 0 || supplied != expected) return;
@@ -32,10 +32,15 @@ public final class AlarmReceiver extends BroadcastReceiver {
             return;
         }
         long delay = System.currentTimeMillis() - expected;
+        // 推迟时旧闹钟可能已经进入投递队列；提前回调不能取消仍在未来的新预约。
+        if (delay < -2000) {
+            ZenScheduler.record(c, "忽略提前到达的" + (test ? "测试" : "每日") + "回调，保留原预约");
+            return;
+        }
         if (test) ZenScheduler.cancelTest(c);
-        else ZenScheduler.scheduleSlot(c, slot);
+        else { ZenScheduler.scheduleSlot(c, slot, Math.max(System.currentTimeMillis(), expected)); ZenGuardService.sync(c); }
         // 拒绝旧广播和严重延迟后的补执行，避免在用户意外的时刻进入超禅。
-        if (delay < -2000 || delay > 10 * 60 * 1000L) {
+        if (delay > 10 * 60 * 1000L) {
             ZenScheduler.record(c, "跳过已过期的" + (test ? "测试" : "每日") + "任务");
             return;
         }

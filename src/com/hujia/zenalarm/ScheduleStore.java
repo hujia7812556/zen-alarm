@@ -20,7 +20,7 @@ final class ScheduleStore {
         Slot(int time, boolean enabled) {
             if (time < 0 || time >= 1440) throw new IllegalArgumentException("时间无效");
             this.time = time;
-            this.enabled = enabled;
+            this.enabled = time == FixedTime.TIME || enabled;
         }
 
         /** 按时分排序，方便浏览。 */
@@ -30,7 +30,7 @@ final class ScheduleStore {
     /** 禁止实例化存储工具。 */
     private ScheduleStore() {}
 
-    /** 首次升级保留旧版时分和总开关，不重新开启已关闭的总开关。 */
+    /** 首次升级保留旧版时分；固定 01:00 由统一存取规则始终补齐并开启。 */
     static boolean migrate(Context c) {
         SharedPreferences p = ZenScheduler.prefs(c);
         if (p.contains("slots")) return false;
@@ -40,7 +40,7 @@ final class ScheduleStore {
         return true;
     }
 
-    /** 读取全部定时，跳过损坏记录，不静默创建自动启动任务。 */
+    /** 读取全部定时，固定 01:00 始终存在且启用，其他条目保持原设置。 */
     static List<Slot> load(Context c) {
         List<Slot> slots = new ArrayList<>();
         try {
@@ -52,6 +52,7 @@ final class ScheduleStore {
                     slots.add(new Slot(time, item.optBoolean("enabled", true)));
             }
         } catch (JSONException e) { android.util.Log.e("ZenAlarm", "定时记录读取失败", e); }
+        if (find(slots, FixedTime.TIME) == null) slots.add(new Slot(FixedTime.TIME, true));
         Collections.sort(slots);
         return slots;
     }
@@ -62,11 +63,14 @@ final class ScheduleStore {
         return null;
     }
 
-    /** 一次写入完整列表；闹钟更新由调度器负责。 */
+    /** 一次写入完整列表；即便调用方遗漏或关闭 01:00，也在存储层恢复固定项。 */
     static void save(Context c, List<Slot> slots) {
+        List<Slot> normalized = new ArrayList<>();
+        normalized.add(new Slot(FixedTime.TIME, true));
+        for (Slot slot : slots) if (find(normalized, slot.time) == null) normalized.add(slot);
         JSONArray array = new JSONArray();
         try {
-            for (Slot slot : slots) {
+            for (Slot slot : normalized) {
                 JSONObject item = new JSONObject();
                 item.put("time", slot.time);
                 item.put("enabled", slot.enabled);

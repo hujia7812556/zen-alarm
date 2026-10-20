@@ -72,8 +72,10 @@ def main():
     tests = BUILD / "tests"
     tests.mkdir(exist_ok=True)
     run("javac", "--release", "8", "-encoding", "UTF-8", "-d", tests,
-        PROJECT / "src/com/hujia/zenalarm/AlarmTime.java", PROJECT / "tests/AlarmTimeTest.java")
+        PROJECT / "src/com/hujia/zenalarm/AlarmTime.java", PROJECT / "src/com/hujia/zenalarm/FixedTime.java",
+        PROJECT / "tests/AlarmTimeTest.java", PROJECT / "tests/FixedTimeTest.java")
     run("java", "-cp", tests, "com.hujia.zenalarm.AlarmTimeTest")
+    run("java", "-cp", tests, "com.hujia.zenalarm.FixedTimeTest")
     generated = BUILD / "generated"
     generated.mkdir(exist_ok=True)
     resources = BUILD / "resources.zip"
